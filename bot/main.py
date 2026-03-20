@@ -39,6 +39,8 @@ from notifications import Notifier
 from timelapse import Timelapse
 from websocket_helper import WebSocketHelper
 
+from api_server import start_api_server
+
 with contextlib.suppress(ImportError):
     import uvloop  # type: ignore
 
