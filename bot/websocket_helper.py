@@ -296,7 +296,7 @@ class WebSocketHelper:
             self._timelapse.is_running = False
             self._notifier.remove_notifier_timer()
             self._timelapse.clean()
-            self._notifier.send_printer_status_notification("Print cancelled")
+            self._notifier.send_printer_status_notification("Печать отменена. Пластик в мусорку! 🗑")
         elif state:
             logger.error("Unknown state: %s", state)
 

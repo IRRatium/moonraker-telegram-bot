@@ -124,10 +124,8 @@ executors_pool: ThreadPoolExecutor = ThreadPoolExecutor(2, thread_name_prefix="b
 
 
 async def echo_unknown(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.message is None:
-        return
-    await update.message.reply_text(f"unknown command: {update.message.text}", quote=True)
-
+    # Бот просто игнорирует текст, который не является командой
+    return
 
 async def unknown_chat(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_chat is None:
@@ -147,33 +145,27 @@ async def unknown_chat(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def status_no_confirm(effective_message: Message) -> None:
-    if klippy.printing and not configWrap.notifications.group_only:
-        notifier.update_status()
-        time.sleep(configWrap.camera.light_timeout + 1.5)
-        await effective_message.delete()
-    else:
-        mess = await klippy.get_status()
-        if cameraWrap.enabled:
-            loop_loc = asyncio.get_running_loop()
-            with await loop_loc.run_in_executor(executors_pool, cameraWrap.take_photo) as bio:
-                await effective_message.get_bot().send_chat_action(chat_id=configWrap.secrets.chat_id, action=ChatAction.UPLOAD_PHOTO)
-                await effective_message.reply_photo(
-                    photo=bio,
-                    caption=mess,
-                    parse_mode=ParseMode.HTML,
-                    disable_notification=notifier.silent_commands,
-                )
-                bio.close()
-        else:
-            await effective_message.get_bot().send_chat_action(chat_id=configWrap.secrets.chat_id, action=ChatAction.TYPING)
-            await effective_message.reply_text(
-                mess,
+    # Мы убрали условие 'if klippy.printing', чтобы бот всегда присылал новое сообщение
+    mess = await klippy.get_status()
+    if cameraWrap.enabled:
+        loop_loc = asyncio.get_running_loop()
+        with await loop_loc.run_in_executor(executors_pool, cameraWrap.take_photo) as bio:
+            await effective_message.get_bot().send_chat_action(chat_id=configWrap.secrets.chat_id, action=ChatAction.UPLOAD_PHOTO)
+            await effective_message.reply_photo(
+                photo=bio,
+                caption=mess,
                 parse_mode=ParseMode.HTML,
                 disable_notification=notifier.silent_commands,
-                quote=True,
             )
-
-
+            bio.close()
+    else:
+        await effective_message.get_bot().send_chat_action(chat_id=configWrap.secrets.chat_id, action=ChatAction.TYPING)
+        await effective_message.reply_text(
+            mess,
+            parse_mode=ParseMode.HTML,
+            disable_notification=notifier.silent_commands,
+            quote=True,
+        )
 async def status(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_message is None or update.effective_message.get_bot() is None:
         logger.warning("Undefined effective message or bot")
@@ -289,17 +281,16 @@ def confirm_keyboard(callback_mess: str) -> InlineKeyboardMarkup:
     keyboard = [
         [
             InlineKeyboardButton(
-                emoji.emojize(":white_check_mark: ", language="alias"),
+                emoji.emojize(":white_check_mark: Да, жми!", language="alias"),
                 callback_data=callback_mess,
             ),
             InlineKeyboardButton(
-                emoji.emojize(":no_entry_sign: ", language="alias"),
+                emoji.emojize(":no_entry_sign: Ой, не надо", language="alias"),
                 callback_data="do_nothing",
             ),
         ]
     ]
     return InlineKeyboardMarkup(keyboard)
-
 
 async def command_confirm_message(update: Update, text: str, callback_mess: str) -> None:
     if update.effective_message is None or update.effective_message.get_bot() is None:
@@ -340,25 +331,38 @@ async def command_exec(effective_message: Message, exec_text: str, exec_func: Co
 
 async def pause_printing(update: Update, __: ContextTypes.DEFAULT_TYPE) -> None:
     await command_confirm_message_ext(
-        update=update, command="pause", confirm_text="Pause printing?", exec_text="Pausing printing", callback_mess="pause_printing", exec_func=ws_helper.manage_printing("pause")
+        update=update, command="pause", 
+        confirm_text="Ставим на паузу? Сопли же будут! ⏸", 
+        exec_text="Торможу... Пойду покурю. ✨", 
+        callback_mess="pause_printing", 
+        exec_func=ws_helper.manage_printing("pause")
     )
-
 
 async def resume_printing(update: Update, __: ContextTypes.DEFAULT_TYPE) -> None:
     await command_confirm_message_ext(
-        update=update, command="resume", confirm_text="Resume printing?", exec_text="Resuming printing", callback_mess="resume_printing", exec_func=ws_helper.manage_printing("resume")
+        update=update, command="resume", 
+        confirm_text="Продолжаем печатать шедевр? ▶️", 
+        exec_text="Погнали дальше! 🚀", 
+        callback_mess="resume_printing", 
+        exec_func=ws_helper.manage_printing("resume")
     )
-
 
 async def cancel_printing(update: Update, __: ContextTypes.DEFAULT_TYPE) -> None:
     await command_confirm_message_ext(
-        update=update, command="cancel", confirm_text="Cancel printing?", exec_text="Canceling printing", callback_mess="cancel_printing", exec_func=ws_helper.manage_printing("cancel")
+        update=update, command="cancel", 
+        confirm_text="Всё, сдаемся? Печать в мусорку? 🗑", 
+        exec_text="Утилизирую пластик... Потрачено. 💀", 
+        callback_mess="cancel_printing", 
+        exec_func=ws_helper.manage_printing("cancel")
     )
-
 
 async def emergency_stop(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     await command_confirm_message_ext(
-        update=update, command="emergency", confirm_text="Execute emergency stop?", exec_text="Executing emergency stop", callback_mess="emergency_stop", exec_func=ws_helper.emergency_stop_printer()
+        update=update, command="emergency", 
+        confirm_text="КРАСНАЯ КНОПКА! ЖМЁМ?! 🚨", 
+        exec_text="ГОРШОЧЕК НЕ ВАРИ! СТОП! 🛑", 
+        callback_mess="emergency_stop", 
+        exec_func=ws_helper.emergency_stop_printer()
     )
 
 
@@ -380,11 +384,11 @@ async def shutdown_host(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def reboot_host(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
-    await command_confirm_message_ext(update=update, command="reboot", confirm_text="Reboot host?", exec_text="Rebooting host", callback_mess="reboot_host", exec_func=ws_helper.reboot_pi_host())
+    await command_confirm_message_ext(update=update, command="reboot243243242", confirm_text="Reboot host?", exec_text="Rebooting host", callback_mess="reboot_host", exec_func=ws_helper.reboot_pi_host())
 
 
 async def bot_restart(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
-    await command_confirm_message_ext(update=update, command="bot_restart", confirm_text="Restart bot?", exec_text="Restarting bot", callback_mess="bot_restart", exec_func=restart_bot())
+    await command_confirm_message_ext(update=update, command="bot_restart", confirm_text="Ребутим бота?!?!?!?", exec_text="Ребутим....", callback_mess="bot_restart", exec_func=restart_bot())
 
 
 def prepare_log_files() -> tuple[List[str], bool, Optional[str]]:
@@ -1116,26 +1120,26 @@ def create_keyboard():
 
 def bot_commands() -> Dict[str, str]:
     commands = {
-        "help": "list bot commands",
-        "status": "send klipper status",
-        "ip": "send private ip of the bot installation",
-        "video": "record and upload a video",
-        "pause": "pause printing",
-        "resume": "resume printing",
-        "cancel": "cancel printing",
-        "power": "toggle moonraker power device from config",
-        "light": "toggle light",
-        "emergency": "emergency stop printing",
-        "shutdown": "shutdown bot host gracefully",
-        "reboot": "reboot bot host gracefully",
-        "bot_restart": "restarts the bot service, useful for config updates",
-        "fw_restart": "Execute klipper FIRMWARE_RESTART",
-        "services": "List services and restart them",
-        "files": "list available gcode files",
-        "macros": "list all visible macros from klipper",
-        "gcode": 'run any gcode command, spaces are supported. "gcode G28 Z"',
-        "logs": "get klipper, moonraker, bot logs",
-        "logs_upload": "upload logs to analyzer",
+        "help": "че я умею?",
+        "status": "че там с моим пластиковым заводом?",
+        "ip": "адрес принтера в сети",
+        "video": "записать видосик процесса",
+        "pause": "пауза (аккуратно, сопли!)",
+        "resume": "продолжить печать",
+        "cancel": "отмена, всё фигня",
+        "power": "вкл/выкл питание",
+        "light": "управление светом",
+        "emergency": "ААА! СТОП-КРАН! 🚨",
+        "shutdown": "выключить принтер совсем",
+        "reboot": "перезагрузить хост",
+        "bot_restart": "перезагрузить бота",
+        "fw_restart": "перезагрузить прошивку Klipper",
+        "services": "управление сервисами (Moonraker и др.)",
+        "files": "мои файлы для печати",
+        "macros": "запуск макросов",
+        "gcode": "отправить G-код напрямую",
+        "logs": "забрать логи",
+        "logs_upload": "залить логи в анализатор",
     }
     return {c: a for c, a in commands.items() if c not in configWrap.telegram_ui.hidden_bot_commands}
 

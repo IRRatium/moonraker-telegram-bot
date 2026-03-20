@@ -422,7 +422,7 @@ class Notifier:
         self.remove_notifier_timer()
 
     async def _send_print_start_info(self) -> None:
-        message, bio = await self._klippy.get_file_info("Printer started printing")
+        message, bio = await self._klippy.get_file_info("Погнали! Надеюсь, первый слой не подведёт 🚀")
         if bio is not None:
             status_message = await self._bot.send_photo(
                 self._chat_id,
@@ -462,7 +462,7 @@ class Notifier:
         # Todo: reset something? or check if reseted by setting new filename?
 
     async def _send_print_finish(self) -> None:
-        self._schedule_notification(message="Finished printing", finish=True)
+        self._schedule_notification(message="Шедевр готов! С тебя лайк. ✅", finish=True)
 
     def send_print_finish(self) -> None:
         if self._enabled:

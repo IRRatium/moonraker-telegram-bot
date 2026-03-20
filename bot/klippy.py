@@ -404,26 +404,41 @@ class Klippy:
 
     @staticmethod
     def _sensor_message(name: str, value) -> str:
-        sens_name = re.sub(r"([A-Z]|\d|_)", r" \1", name).replace("_", "")
-        message = ""
+        # Убираем лишние подчеркивания и форматируем имя
+        sens_name = re.sub(r"([A-Z]|\d|_)", r" \1", name).replace("_", "").strip()
+        
+        # Словарь для перевода названий
+        translate_dict = {
+            "Heater Bed": "Стол",
+            "Extruder": "Экструдер",
+            "Fan": "Обдув"
+        }
+        for eng, rus in translate_dict.items():
+            if eng in sens_name:
+                sens_name = sens_name.replace(eng, rus)
 
+        message = ""
         if "power" in value:
-            message = emoji.emojize(":hotsprings: ", language="alias")
+            message = "🍳 "
         elif "speed" in value:
-            message = emoji.emojize(":tornado: ", language="alias")
+            message = "🐷 "
         elif "temperature" in value:
-            message = emoji.emojize(":thermometer: ", language="alias")
+            message = "🌡️ "
 
         message += f"{sens_name.title()}:"
 
         if "temperature" in value:
-            message += f" {round(value['temperature'])} \N{DEGREE SIGN}C"
+            message += f" {round(value['temperature'])} °C"
+        
         if "target" in value and value["target"] > 0.0 and abs(value["target"] - value["temperature"]) > 2:
-            message += emoji.emojize(" :arrow_right: ", language="alias") + f"{round(value['target'])} \N{DEGREE SIGN}C"
+            message += f" ➡️ {round(value['target'])} °C"
+            
         if "power" in value and value["power"] > 0.0:
-            message += emoji.emojize(" :fire:", language="alias")
+            message += " 🔥"
+            
         if "speed" in value:
             message += f" {round(value['speed'] * 100)}%"
+            
         if "rpm" in value and value["rpm"] is not None:
             message += f" {round(value['rpm'])} RPM"
 
@@ -506,25 +521,30 @@ class Klippy:
         return await self._populate_with_thumb(self._thumbnail_path, message)
 
     def _get_printing_file_info(self, message_pre: str = "") -> str:
-        message = f"Printing: {self.printing_filename} \n" if not message_pre else f"{message_pre}: {self.printing_filename} \n"
+        # Перевод заголовка
+        message = f"Печатаю: {self.printing_filename} \n" if not message_pre else f"{message_pre}: {self.printing_filename} \n"
+        
         if "progress" in self._message_parts:
-            message += f"Progress {round(self.printing_progress * 100, 0)}%"
+            message += f"Прогресс {round(self.printing_progress * 100, 0)}%"
+        
         if "height" in self._message_parts:
-            message += f", height: {round(self.printing_height, 2)}mm\n" if self.printing_height > 0.0 else "\n"
+            message += f", высота: {round(self.printing_height, 2)}мм\n" if self.printing_height > 0.0 else "\n"
+            
         if self.filament_total > 0.0:
             if "filament_length" in self._message_parts:
-                message += f"Filament: {round(self.filament_used / 1000, 2)}m / {round(self.filament_total / 1000, 2)}m"
+                message += f"Пластик: {round(self.filament_used / 1000, 2)}м / {round(self.filament_total / 1000, 2)}м"
             if self.filament_weight > 0.0 and "filament_weight" in self._message_parts:
-                message += f", weight: {round(self._filament_weight_used(), 2)}/{self.filament_weight}g"
+                message += f", вес: {round(self._filament_weight_used(), 2)}/{self.filament_weight}г"
             message += "\n"
+            
         if "print_duration" in self._message_parts:
-            message += f"Printing for {timedelta(seconds=round(self.printing_duration))}\n"
+            message += f"В печати: {timedelta(seconds=round(self.printing_duration))}\n"
 
         eta = self._get_eta()
         if "eta" in self._message_parts:
-            message += f"Estimated time left: {eta}\n"
+            message += f"Осталось примерно: {eta}\n"
         if "finish_time" in self._message_parts:
-            message += f"Finish at {datetime.now() + eta:%Y-%m-%d %H:%M}\n"
+            message += f"Завершение в {datetime.now() + eta:%Y-%m-%d %H:%M}\n"
 
         return message
 
@@ -538,28 +558,26 @@ class Klippy:
                 resp.raise_for_status()
         except httpx.HTTPError as err:
             logger.error("Get status failed `%s`", err)
-            return f"Failed to get status: `{err}`"
+            return f"Ошибка статуса: `{err}`"
 
         resp_json = orjson.loads(resp.text)
         print_stats = resp_json["result"]["status"]["print_stats"]
         message = ""
 
-        # Todo: refactor!
         if print_stats["state"] == "printing":
+            message += "<tg-emoji emoji-id=\"5469852490264506631\">😎</tg-emoji><tg-emoji emoji-id=\"5469852490264506631\">😎</tg-emoji><tg-emoji emoji-id=\"5469852490264506631\">😎</tg-emoji><b>Печатаю...</b><tg-emoji emoji-id=\"5469852490264506631\">😎</tg-emoji><tg-emoji emoji-id=\"5469852490264506631\">😎</tg-emoji><tg-emoji emoji-id=\"5469852490264506631\">😎</tg-emoji>\n"
             if not self.printing_filename:
                 await self.set_printing_filename(print_stats["filename"])
         elif print_stats["state"] == "paused":
-            message += "Printing paused\n"
+            message += "⏸ Пауза\n"
         elif print_stats["state"] == "cancelled":
-            message += "Printing cancelled\n"
+            message += "❌ Отменено\n"
         elif print_stats["state"] == "complete":
-            message += "Printing complete\n"
+            message += "✅ Готово!\n"
         elif print_stats["state"] == "standby":
-            message += "Printer standby\n"
+            message += "💤 Ожидание\n"
         elif print_stats["state"] == "error":
-            message += "Printing error\n"
-            if "message" in print_stats and print_stats["message"]:
-                message += f"{print_stats['message']}\n"
+            message += "💥 ОШИБКА!\n"
 
         message += "\n"
         if self.printing_filename:
