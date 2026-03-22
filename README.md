@@ -1,6 +1,6 @@
 # moonraker-telegram-bot (RU Fork)
 
-![image](https://user-images.githubusercontent.com/51682059/140623765-3b839b4b-40c2-4f87-8969-6cb609f2c5f1.png)
+![image](https://i.ibb.co/p6dLh0n2/2.png)
 
 > **Это форк проекта [nlef/moonraker-telegram-bot](https://github.com/nlef/moonraker-telegram-bot).**
 > Отличия от оригинала:
