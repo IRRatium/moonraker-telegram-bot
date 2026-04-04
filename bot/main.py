@@ -40,6 +40,11 @@ from timelapse import Timelapse
 from websocket_helper import WebSocketHelper
 
 from api_server import start_api_server
+from led_controller import (
+    LedController,
+    COLOR_EMOJI, COLOR_PRESETS, COLOR_RU,
+    EFFECT_EMOJI, EFFECT_RU, EFFECTS,
+)
 
 with contextlib.suppress(ImportError):
     import uvloop  # type: ignore
@@ -102,7 +107,6 @@ def errors_listener(event):
             event.exception.__traceback__,
         ),
     )
-    # logger.error(exception_info, exc_info=True, stack_info=True)
 
 
 a_scheduler = AsyncIOScheduler(
@@ -123,10 +127,10 @@ light_power_device: PowerDevice
 psu_power_device: PowerDevice
 ws_helper: WebSocketHelper
 executors_pool: ThreadPoolExecutor = ThreadPoolExecutor(2, thread_name_prefix="bot_pool")
+led_controller: LedController  # ← NEW
 
 
 async def echo_unknown(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
-    # Бот просто игнорирует текст, который не является командой
     return
 
 async def unknown_chat(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
@@ -147,7 +151,6 @@ async def unknown_chat(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def status_no_confirm(effective_message: Message) -> None:
-    # Мы убрали условие 'if klippy.printing', чтобы бот всегда присылал новое сообщение
     mess = await klippy.get_status()
     if cameraWrap.enabled:
         loop_loc = asyncio.get_running_loop()
@@ -168,6 +171,7 @@ async def status_no_confirm(effective_message: Message) -> None:
             disable_notification=notifier.silent_commands,
             quote=True,
         )
+
 async def status(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_message is None or update.effective_message.get_bot() is None:
         logger.warning("Undefined effective message or bot")
@@ -333,37 +337,37 @@ async def command_exec(effective_message: Message, exec_text: str, exec_func: Co
 
 async def pause_printing(update: Update, __: ContextTypes.DEFAULT_TYPE) -> None:
     await command_confirm_message_ext(
-        update=update, command="pause", 
-        confirm_text="Ставим на паузу? Сопли же будут! ⏸", 
-        exec_text="Торможу... Пойду покурю. ✨", 
-        callback_mess="pause_printing", 
+        update=update, command="pause",
+        confirm_text="Ставим на паузу? Сопли же будут! ⏸",
+        exec_text="Торможу... Пойду покурю. ✨",
+        callback_mess="pause_printing",
         exec_func=ws_helper.manage_printing("pause")
     )
 
 async def resume_printing(update: Update, __: ContextTypes.DEFAULT_TYPE) -> None:
     await command_confirm_message_ext(
-        update=update, command="resume", 
-        confirm_text="Продолжаем печатать шедевр? ▶️", 
-        exec_text="Погнали дальше! 🚀", 
-        callback_mess="resume_printing", 
+        update=update, command="resume",
+        confirm_text="Продолжаем печатать шедевр? ▶️",
+        exec_text="Погнали дальше! 🚀",
+        callback_mess="resume_printing",
         exec_func=ws_helper.manage_printing("resume")
     )
 
 async def cancel_printing(update: Update, __: ContextTypes.DEFAULT_TYPE) -> None:
     await command_confirm_message_ext(
-        update=update, command="cancel", 
-        confirm_text="Всё, сдаемся? Печать в мусорку? 🗑", 
-        exec_text="Утилизирую пластик... Потрачено. 💀", 
-        callback_mess="cancel_printing", 
+        update=update, command="cancel",
+        confirm_text="Всё, сдаемся? Печать в мусорку? 🗑",
+        exec_text="Утилизирую пластик... Потрачено. 💀",
+        callback_mess="cancel_printing",
         exec_func=ws_helper.manage_printing("cancel")
     )
 
 async def emergency_stop(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     await command_confirm_message_ext(
-        update=update, command="emergency", 
-        confirm_text="КРАСНАЯ КНОПКА! ЖМЁМ?! 🚨", 
-        exec_text="ГОРШОЧЕК НЕ ВАРИ! СТОП! 🛑", 
-        callback_mess="emergency_stop", 
+        update=update, command="emergency",
+        confirm_text="КРАСНАЯ КНОПКА! ЖМЁМ?! 🚨",
+        exec_text="ГОРШОЧЕК НЕ ВАРИ! СТОП! 🛑",
+        callback_mess="emergency_stop",
         exec_func=ws_helper.emergency_stop_printer()
     )
 
@@ -391,6 +395,79 @@ async def reboot_host(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def bot_restart(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
     await command_confirm_message_ext(update=update, command="bot_restart", confirm_text="Ребутим бота?!?!?!?", exec_text="Ребутим....", callback_mess="bot_restart", exec_func=restart_bot())
+
+
+# ============================================================
+#  LED CONTROL
+# ============================================================
+
+def _led_main_keyboard() -> InlineKeyboardMarkup:
+    """Main LED menu keyboard."""
+    on_label = "🔴 Выключить" if led_controller.on else "🟢 Включить"
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🎨 Цвет",     callback_data="led_color_menu"),
+            InlineKeyboardButton("🌟 Яркость",  callback_data="led_brightness_menu"),
+        ],
+        [
+            InlineKeyboardButton("✨ Эффект",   callback_data="led_effect_menu"),
+            InlineKeyboardButton(on_label,       callback_data="led_toggle"),
+        ],
+        [InlineKeyboardButton("✖️ Закрыть",     callback_data="do_nothing")],
+    ])
+
+
+def _led_color_keyboard() -> InlineKeyboardMarkup:
+    """Color selection keyboard."""
+    rows: List[List[InlineKeyboardButton]] = []
+    items = list(COLOR_PRESETS.keys())
+    for i in range(0, len(items), 2):
+        row = []
+        for key in items[i:i + 2]:
+            icon = COLOR_EMOJI.get(key, "🎨")
+            label = f"{icon} {COLOR_RU.get(key, key)}"
+            row.append(InlineKeyboardButton(label, callback_data=f"led_color:{key}"))
+        rows.append(row)
+    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="led_menu")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _led_brightness_keyboard() -> InlineKeyboardMarkup:
+    """Brightness selection keyboard."""
+    levels = [10, 25, 50, 75, 100]
+    row = [InlineKeyboardButton(f"{v}%", callback_data=f"led_brightness:{v}") for v in levels]
+    return InlineKeyboardMarkup([row, [InlineKeyboardButton("◀️ Назад", callback_data="led_menu")]])
+
+
+def _led_effect_keyboard() -> InlineKeyboardMarkup:
+    """Effect selection keyboard."""
+    rows: List[List[InlineKeyboardButton]] = []
+    for i in range(0, len(EFFECTS), 3):
+        row = []
+        for ef in EFFECTS[i:i + 3]:
+            icon = EFFECT_EMOJI.get(ef, "✨")
+            label = f"{icon} {EFFECT_RU.get(ef, ef)}"
+            row.append(InlineKeyboardButton(label, callback_data=f"led_effect:{ef}"))
+        rows.append(row)
+    rows.append([InlineKeyboardButton("◀️ Назад", callback_data="led_menu")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def led_command(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler for /led command — shows the LED control menu."""
+    if update.effective_message is None:
+        return
+    await update.effective_message.get_bot().send_chat_action(chat_id=configWrap.secrets.chat_id, action=ChatAction.TYPING)
+    await update.effective_message.reply_text(
+        text=led_controller.status_text(),
+        reply_markup=_led_main_keyboard(),
+        parse_mode=ParseMode.MARKDOWN,
+        disable_notification=notifier.silent_commands,
+        quote=True,
+    )
+
+
+# ============================================================
 
 
 def prepare_log_files() -> tuple[List[str], bool, Optional[str]]:
@@ -530,8 +607,6 @@ async def upload_logs(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def restart_bot() -> None:
     a_scheduler.shutdown(wait=False)
-    # if ws_helper.websocket:
-    #     ws_helper.websocket.close()
     os.kill(main_pid, signal.SIGTERM)
 
 
@@ -688,8 +763,88 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     await context.bot.send_chat_action(chat_id=configWrap.secrets.chat_id, action=ChatAction.TYPING)
-
     await query.answer()
+
+    # ------------------------------------------------------------------ #
+    #  LED menu handlers                                                   #
+    # ------------------------------------------------------------------ #
+    if query.data == "led_menu":
+        await query.edit_message_text(
+            text=led_controller.status_text(),
+            reply_markup=_led_main_keyboard(),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    if query.data == "led_color_menu":
+        await query.edit_message_text(
+            text=led_controller.status_text() + "\n\n*Выберите цвет:*",
+            reply_markup=_led_color_keyboard(),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    if query.data == "led_brightness_menu":
+        await query.edit_message_text(
+            text=led_controller.status_text() + "\n\n*Выберите яркость:*",
+            reply_markup=_led_brightness_keyboard(),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    if query.data == "led_effect_menu":
+        await query.edit_message_text(
+            text=led_controller.status_text() + "\n\n*Выберите эффект:*",
+            reply_markup=_led_effect_keyboard(),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    if query.data.startswith("led_color:"):
+        color = query.data.replace("led_color:", "")
+        led_controller.set_color(color)
+        await query.edit_message_text(
+            text=led_controller.status_text(),
+            reply_markup=_led_main_keyboard(),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    if query.data.startswith("led_brightness:"):
+        try:
+            brightness = int(query.data.replace("led_brightness:", ""))
+            led_controller.set_brightness(brightness)
+        except ValueError:
+            pass
+        await query.edit_message_text(
+            text=led_controller.status_text(),
+            reply_markup=_led_main_keyboard(),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    if query.data.startswith("led_effect:"):
+        effect = query.data.replace("led_effect:", "")
+        led_controller.set_effect(effect)
+        await query.edit_message_text(
+            text=led_controller.status_text(),
+            reply_markup=_led_main_keyboard(),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    if query.data == "led_toggle":
+        led_controller.toggle()
+        await query.edit_message_text(
+            text=led_controller.status_text(),
+            reply_markup=_led_main_keyboard(),
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return
+
+    # ------------------------------------------------------------------ #
+    #  Original handlers                                                   #
+    # ------------------------------------------------------------------ #
     if query.data == "do_nothing":
         if update.effective_message.reply_to_message:
             await context.bot.delete_message(
@@ -728,22 +883,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             mess = f"Device `{psu_power_device.name}` failed to toggle off\nError: {psu_power_device.device_error}"
         else:
             mess = f"Device `{psu_power_device.name}` toggled off"
-        await update.effective_message.reply_to_message.reply_text(
-            mess,
-            parse_mode=ParseMode.HTML,
-            quote=True,
-        )
+        await update.effective_message.reply_to_message.reply_text(mess, parse_mode=ParseMode.HTML, quote=True)
     elif query.data == "power_on_printer":
         await psu_power_device.switch_device(True)
         if psu_power_device.device_error:
             mess = f"Device `{psu_power_device.name}` failed to toggle on\nError: {psu_power_device.device_error}"
         else:
             mess = f"Device `{psu_power_device.name}` toggled on"
-        await update.effective_message.reply_to_message.reply_text(
-            mess,
-            parse_mode=ParseMode.HTML,
-            quote=True,
-        )
+        await update.effective_message.reply_to_message.reply_text(mess, parse_mode=ParseMode.HTML, quote=True)
     elif "macro:" in query.data:
         command = query.data.replace("macro:", "")
         await command_exec(effective_message=update.effective_message.reply_to_message, exec_text=f"Running macro: {command}", exec_func=ws_helper.execute_ws_gcode_script(command))
@@ -905,7 +1052,6 @@ async def services_keyboard(update: Update, _: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def exec_gcode(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
-    # maybe use context.args
     if update.effective_message is None or update.effective_message.text is None:
         logger.warning("Undefined effective message or text")
         return
@@ -1011,7 +1157,6 @@ async def upload_file(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    # Todo: add context managment!
     uploaded_bio = BytesIO()
     uploaded_bio.name = doc.file_name
     uploaded_bio.write(file_byte_array)
@@ -1066,14 +1211,8 @@ async def upload_file(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
                 filehash = hashlib.md5(doc.file_name.encode()).hexdigest() + ".gcode"
                 keyboard = [
                     [
-                        InlineKeyboardButton(
-                            emoji.emojize(":robot: print file", language="alias"),
-                            callback_data=f"print_file:{filehash}",
-                        ),
-                        InlineKeyboardButton(
-                            emoji.emojize(":cross_mark: do nothing", language="alias"),
-                            callback_data="do_nothing",
-                        ),
+                        InlineKeyboardButton(emoji.emojize(":robot: print file", language="alias"), callback_data=f"print_file:{filehash}"),
+                        InlineKeyboardButton(emoji.emojize(":cross_mark: do nothing", language="alias"), callback_data="do_nothing"),
                     ]
                 ]
                 await update.effective_message.reply_photo(
@@ -1085,8 +1224,6 @@ async def upload_file(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
                     caption_entities=[MessageEntity(type="bold", offset=len(start_pre_mess), length=len(f"{configWrap.bot_config.formatted_upload_path}{sending_bio.name}"))],
                 )
                 thumb.close()
-                # Todo: delete uploaded file
-                # bot.delete_message(update.effective_message.chat_id, update.effective_message.message_id)
             else:
                 await update.effective_message.reply_text(
                     f"Failed uploading file: {sending_bio.name}",
@@ -1113,6 +1250,8 @@ def create_keyboard():
         custom_keyboard.append("/power")
     if light_power_device:
         custom_keyboard.append("/light")
+    # LED control always available
+    custom_keyboard.append("/led")
 
     keyboard = configWrap.telegram_ui.buttons
     if len(custom_keyboard) > 0:
@@ -1131,6 +1270,7 @@ def bot_commands() -> Dict[str, str]:
         "cancel": "отмена, всё фигня",
         "power": "вкл/выкл питание",
         "light": "управление светом",
+        "led": "💡 RGB-подсветка принтера",
         "emergency": "ААА! СТОП-КРАН! 🚨",
         "shutdown": "выключить принтер совсем",
         "reboot": "перезагрузить хост",
@@ -1147,17 +1287,12 @@ def bot_commands() -> Dict[str, str]:
 
 
 async def help_command_no_confirm(effective_message: Message) -> None:
-    ## Fixme: escape symbols???  from telegram.utils.helpers import escape
     mess = (
         await klippy.get_versions_info(bot_only=True)
         + ("\n".join([f"/{c} - {a}" for c, a in bot_commands().items()]))
         + '\n\nPlease refer to the <a href="https://github.com/nlef/moonraker-telegram-bot/wiki">wiki</a> for additional information'
     )
-    await effective_message.reply_text(
-        text=mess,
-        parse_mode=ParseMode.HTML,
-        quote=True,
-    )
+    await effective_message.reply_text(text=mess, parse_mode=ParseMode.HTML, quote=True)
 
 
 async def help_command(update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1204,6 +1339,7 @@ async def greeting_message(bot: telegram.Bot) -> None:
             mess += f"Bot online, no moonraker connection!\n {response} \nFailing..."
         else:
             mess += "Printer online on " + get_local_ip()
+            mess += f"\n💡 LED API: http://{get_local_ip()}:7177/ledstatus"
             if configWrap.configuration_errors:
                 mess += await klippy.get_versions_info(bot_only=True) + configWrap.configuration_errors
 
@@ -1270,6 +1406,7 @@ def start_bot(bot_token, socks):
     application.add_handler(CommandHandler("cancel", cancel_printing))
     application.add_handler(CommandHandler("power", power_toggle))
     application.add_handler(CommandHandler("light", light_toggle))
+    application.add_handler(CommandHandler("led", led_command))   # ← NEW
     application.add_handler(CommandHandler("emergency", emergency_stop))
     application.add_handler(CommandHandler("shutdown", shutdown_host))
     application.add_handler(CommandHandler("reboot", reboot_host))
@@ -1283,9 +1420,7 @@ def start_bot(bot_token, socks):
     application.add_handler(CommandHandler("logs_upload", upload_logs, block=False))
 
     application.add_handler(MessageHandler(filters.COMMAND, macros_handler, block=False))
-
     application.add_handler(MessageHandler(filters.Document.ALL & (~filters.COMMAND), upload_file, block=False))
-
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), echo_unknown))
 
     application.add_error_handler(bot_error_handler)
@@ -1295,45 +1430,24 @@ def start_bot(bot_token, socks):
 
 async def start_scheduler(context: ContextTypes.DEFAULT_TYPE):
     a_scheduler.start()
-    a_scheduler.add_job(
-        greeting_message,
-        # kwargs={"bot": bot_updater.bot},
-        kwargs={"bot": context.bot},
-    )
-    # bot_updater.create_task(ws_helper.run_forever_async())
+    a_scheduler.add_job(greeting_message, kwargs={"bot": context.bot})
     loop = asyncio.get_event_loop()
     loop.create_task(ws_helper.run_forever_async())
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Moonraker Telegram Bot")
-    parser.add_argument(
-        "-c",
-        "--configfile",
-        default="./telegram.conf",
-        metavar="<configfile>",
-        help="Location of moonraker telegram bot configuration file",
-    )
-    parser.add_argument(
-        "-l",
-        "--logfile",
-        metavar="<logfile>",
-        help="Location of moonraker telegram bot log file",
-    )
+    parser.add_argument("-c", "--configfile", default="./telegram.conf", metavar="<configfile>", help="Location of moonraker telegram bot configuration file")
+    parser.add_argument("-l", "--logfile", metavar="<logfile>", help="Location of moonraker telegram bot log file")
     system_args = parser.parse_args()
 
-    # Todo: os.chdir(Path(sys.path[0]).parent.absolute())
     os.chdir(sys.path[0])
 
     configWrap = ConfigWrapper(system_args.configfile)
     configWrap.bot_config.log_path_update(system_args.logfile)
     configWrap.dump_config_to_log()
 
-    rotating_handler = RotatingFileHandler(
-        configWrap.bot_config.log_file,
-        maxBytes=26214400,
-        backupCount=3,
-    )
+    rotating_handler = RotatingFileHandler(configWrap.bot_config.log_file, maxBytes=26214400, backupCount=3)
     rotating_handler.setFormatter(SensitiveFormatter("%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s"))
     logger.addHandler(rotating_handler)
 
@@ -1351,7 +1465,6 @@ if __name__ == "__main__":
         logging.getLogger("apscheduler").addHandler(rotating_handler)
         logging.getLogger("apscheduler").setLevel(logging.DEBUG)
         logging.getLogger("httpx").setLevel(logging.DEBUG)
-        # logging.getLogger("httpcore").setLevel(logging.DEBUG)
 
     klippy = Klippy(configWrap, rotating_handler)
 
@@ -1366,12 +1479,15 @@ if __name__ == "__main__":
         if configWrap.camera.cam_type == "mjpeg"
         else FFmpegCamera(configWrap, klippy, rotating_handler) if configWrap.camera.cam_type == "ffmpeg" else Camera(configWrap, klippy, rotating_handler)
     )
+
+    led_controller = LedController()   # ← NEW
+
     bot_updater = start_bot(configWrap.secrets.token, configWrap.bot_config.socks_proxy)
     timelapse = Timelapse(configWrap, klippy, cameraWrap, a_scheduler, bot_updater.bot, rotating_handler)
     notifier = Notifier(configWrap, bot_updater.bot, klippy, cameraWrap, a_scheduler, rotating_handler)
 
     ws_helper = WebSocketHelper(configWrap, klippy, notifier, timelapse, a_scheduler, rotating_handler)
-    start_api_server(klippy, rotating_handler)
+    start_api_server(klippy, led_controller=led_controller, logging_handler=rotating_handler)  # ← updated call
 
     bot_updater.job_queue.run_once(start_scheduler, 1)
     bot_updater.run_polling(allowed_updates=Update.ALL_TYPES)
