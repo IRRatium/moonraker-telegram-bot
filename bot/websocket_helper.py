@@ -9,6 +9,7 @@ os.environ.setdefault("WEBSOCKETS_MAX_LOG_SIZE", "1048576")  # pylint: disable=C
 os.environ.setdefault("WEBSOCKETS_BACKOFF_MAX_DELAY", "15.0")  # pylint: disable=C0413
 
 from apscheduler.schedulers.base import BaseScheduler  # type: ignore
+import asyncio
 import orjson
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.protocol import State
@@ -58,6 +59,7 @@ class WebSocketHelper:
         self._log_parser: bool = config.bot_config.log_parser
 
         self._ws: ClientConnection
+        self._ws_initialized: bool = False  # guard for reshedule
 
         if config.bot_config.debug:
             logger.setLevel(logging.DEBUG)
@@ -102,8 +104,15 @@ class WebSocketHelper:
         await self._ws.send(orjson.dumps({"jsonrpc": "2.0", "method": "machine.device_power.devices", "id": self._my_id}))
 
     async def reshedule(self):
-        if not self._klippy.connected and self._ws.state is State.OPEN:
-            await self.on_open()
+        """Periodically re-queries klippy state when not connected but WS is open."""
+        if self._klippy.connected:
+            return
+        try:
+            if self._ws_initialized and self._ws.state is State.OPEN:
+                logger.debug("reshedule: klippy not connected, calling on_open()")
+                await self.on_open()
+        except Exception as ex:
+            logger.warning("reshedule error: %s", ex)
 
     async def stop_all(self):
         self._klippy.stop_all()
@@ -118,13 +127,10 @@ class WebSocketHelper:
                 await self._klippy.set_printing_filename(print_stats["filename"])
                 self._klippy.printing_duration = print_stats["print_duration"]
                 self._klippy.filament_used = print_stats["filament_used"]
-                # Todo: maybe get print start time and set start interval for job?
                 self._notifier.add_notifier_timer()
                 if not self._timelapse.manual_mode:
                     self._timelapse.is_running = True
-                    # TOdo: manual timelapse start check?
 
-            # Fixme: some logic error with states for klippy.paused and printing
             if print_stats["state"] == "printing":
                 self._klippy.paused = False
                 if not self._timelapse.manual_mode:
@@ -198,7 +204,6 @@ class WebSocketHelper:
                 self._notifier.schedule_notification(progress=int(message_params_loc["display_status"]["progress"] * 100))
 
         if "toolhead" in message_params_loc and "position" in message_params_loc["toolhead"]:
-            # position_z = json_message["params"][0]['toolhead']['position'][2]
             pass
         if "gcode_move" in message_params_loc and "gcode_position" in message_params_loc["gcode_move"]:
             position_z = message_params_loc["gcode_move"]["gcode_position"][2]
@@ -235,15 +240,12 @@ class WebSocketHelper:
     async def parse_print_stats(self, message_params):
         state = ""
         print_stats_loc = message_params[0]["print_stats"]
-        # Fixme:  maybe do not parse without state? history data may not be avaliable
-        # Message with filename will be sent before printing is started
         if "filename" in print_stats_loc:
             await self._klippy.set_printing_filename(print_stats_loc["filename"])
         if "filament_used" in print_stats_loc:
             self._klippy.filament_used = print_stats_loc["filament_used"]
         if "state" in print_stats_loc:
             state = print_stats_loc["state"]
-        # Fixme: reset notify percent & height on finish/cancel/start
         if "print_duration" in print_stats_loc:
             self._klippy.printing_duration = print_stats_loc["print_duration"]
         if state == "printing":
@@ -265,14 +267,12 @@ class WebSocketHelper:
             self._klippy.paused = True
             if not self._timelapse.manual_mode:
                 self._timelapse.paused = True
-        # Todo: cleanup timelapse dir on cancel print!
         elif state == "complete":
             self._klippy.printing = False
             self._notifier.remove_notifier_timer()
             if not self._timelapse.manual_mode:
                 self._timelapse.is_running = False
                 self._timelapse.send_timelapse()
-            # Fixme: add finish printing method in notifier
             self._notifier.send_print_finish()
         elif state == "error":
             self._klippy.printing = False
@@ -285,10 +285,7 @@ class WebSocketHelper:
         elif state == "standby":
             self._klippy.printing = False
             self._notifier.remove_notifier_timer()
-            # Fixme: check manual mode
             self._timelapse.is_running = False
-            # if not self._timelapse.manual_mode:
-            # self._timelapse.send_timelapse()
             self._notifier.send_printer_status_notification(f"Printer state change: {print_stats_loc['state']} \n")
         elif state == "cancelled":
             self._klippy.paused = False
@@ -329,7 +326,7 @@ class WebSocketHelper:
                     klippy_state = message_result["state"]
                     self._klippy.state = klippy_state
                     if klippy_state == "ready":
-                        if self._ws.state is State.OPEN:
+                        if self._ws_initialized and self._ws.state is State.OPEN:
                             await self._klippy.set_connected(True)
                             if self._klippy.state_message:
                                 self._notifier.send_error(f"Klippy changed state to {self._klippy.state}")
@@ -364,6 +361,7 @@ class WebSocketHelper:
                 logger.warning("klippy disconnect detected with message: %s", json_message["method"])
                 await self.stop_all()
                 await self._klippy.set_connected(False)
+                # Schedule reshedule to keep trying — don't rely solely on WS reconnect
                 self._scheduler.add_job(self.reshedule, "interval", seconds=2, id="ws_reschedule", replace_existing=True, coalesce=True, misfire_grace_time=10)
 
             if "params" not in json_message:
@@ -415,31 +413,63 @@ class WebSocketHelper:
         print("lalal")
 
     async def run_forever_async(self):
-        # Todo: use headers instead of inline token
-        async for websocket in connect(
-            uri=f"{self._protocol}://{self._host}:{self._port}/websocket{await self._klippy.get_one_shot_token()}",
-            process_exception=self.on_error,
-            open_timeout=5.0,
-            ping_interval=10.0,  # as moonraker
-            ping_timeout=30.0,  # as moonraker
-            close_timeout=5.0,
-            max_queue=1024,
-            logger=logger,
-            ssl=self._ssl_context,
-        ):
-            try:
-                self._ws = websocket
-                self._scheduler.add_job(self.reshedule, "interval", seconds=2, id="ws_reschedule", replace_existing=True, coalesce=True, misfire_grace_time=10)
-                # async for message in self._ws:
-                #     await self.websocket_to_message(message)
+        """
+        Main WebSocket loop with robust reconnection.
 
-                while True:
-                    res = await self._ws.recv(decode=False)
-                    await self.websocket_to_message(res)
+        Fixes vs original:
+        - on_open() called immediately on each new connection (no 2-sec wait)
+        - reshedule job NOT removed on inner exception (keeps retrying)
+        - _ws_initialized guard prevents AttributeError in reshedule
+        - outer while True + asyncio.sleep(5) recovers from total connect() failure
+        """
+        while True:
+            try:
+                # Refresh one-shot token on each (re)connect attempt
+                token = await self._klippy.get_one_shot_token()
+                uri = f"{self._protocol}://{self._host}:{self._port}/websocket{token}"
+                logger.info("Connecting to WebSocket: %s", uri.split("?")[0])
+
+                async for websocket in connect(
+                    uri=uri,
+                    process_exception=self.on_error,
+                    open_timeout=5.0,
+                    ping_interval=10.0,   # as moonraker
+                    ping_timeout=30.0,    # as moonraker
+                    close_timeout=5.0,
+                    max_queue=1024,
+                    logger=logger,
+                    ssl=self._ssl_context,
+                ):
+                    try:
+                        self._ws = websocket
+                        self._ws_initialized = True
+
+                        # Ensure reshedule job is always running as a safety net
+                        self._scheduler.add_job(
+                            self.reshedule,
+                            "interval",
+                            seconds=2,
+                            id="ws_reschedule",
+                            replace_existing=True,
+                            coalesce=True,
+                            misfire_grace_time=10,
+                        )
+
+                        # Explicitly query klippy state right away — don't wait for reshedule
+                        await self.on_open()
+
+                        while True:
+                            res = await self._ws.recv(decode=False)
+                            await self.websocket_to_message(res)
+
+                    except Exception as ex:
+                        logger.error("WebSocket session error: %s", ex)
+                        await self._klippy.set_connected(False)
+                        # Do NOT remove ws_reschedule — it keeps pinging until reconnect
+                        # The async-for loop will automatically try a new connection
 
             except Exception as ex:
-                # Todo: add some TG notification?
-                logger.error(ex)
+                # connect() itself failed (e.g. server totally down)
+                logger.error("WebSocket connect() failed: %s", ex)
                 await self._klippy.set_connected(False)
-                if self._scheduler.get_job("ws_reschedule"):
-                    self._scheduler.remove_job("ws_reschedule")
+                await asyncio.sleep(5)  # brief pause before outer retry
