@@ -1240,8 +1240,23 @@ def bot_error_handler(_: object, context: CallbackContext) -> None:
 
 
 def create_keyboard():
+    keyboard = configWrap.telegram_ui.buttons
+
     if not configWrap.telegram_ui.buttons_default:
-        return configWrap.telegram_ui.buttons
+        # Даже при кастомных кнопках — добавляем /led, если его ещё нет
+        flat = [btn for row in keyboard for btn in row]
+        if "/led" not in flat:
+            if keyboard:
+                keyboard[0].append("/led")
+            else:
+                keyboard.append(["/led"])
+        return keyboard
+
+    # Добавляем /led в первый ряд клавиатуры (вместе с /status, /pause и т.д.)
+    if keyboard:
+        keyboard[0].append("/led")
+    else:
+        keyboard.append(["/led"])
 
     custom_keyboard = []
     if cameraWrap.enabled:
@@ -1250,10 +1265,7 @@ def create_keyboard():
         custom_keyboard.append("/power")
     if light_power_device:
         custom_keyboard.append("/light")
-    # LED control always available
-    custom_keyboard.append("/led")
 
-    keyboard = configWrap.telegram_ui.buttons
     if len(custom_keyboard) > 0:
         keyboard.append(custom_keyboard)
     return keyboard
@@ -1339,7 +1351,6 @@ async def greeting_message(bot: telegram.Bot) -> None:
             mess += f"Bot online, no moonraker connection!\n {response} \nFailing..."
         else:
             mess += "Printer online on " + get_local_ip()
-            mess += f"\n💡 LED API: http://{get_local_ip()}:7177/ledstatus"
             if configWrap.configuration_errors:
                 mess += await klippy.get_versions_info(bot_only=True) + configWrap.configuration_errors
 
