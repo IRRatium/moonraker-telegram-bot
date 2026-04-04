@@ -379,20 +379,19 @@ class Klippy:
         connected = False
         retries = 0
         last_reason = ""
-        while not connected and retries < 10:
+        while not connected and retries < 30:          # 30 вместо 10 — даём Moonraker время подняться
             try:
                 response = await self.make_request("GET", "/printer/info", timeout=3)
                 connected = response.is_success
-
+    
                 if connected:
                     return ""
                 else:
-                    # Todo: get reason from error handler
                     last_reason = f"{response.status_code}"
             except Exception as ex:
                 logger.error(ex, exc_info=True)
             retries += 1
-            time.sleep(1)
+            await asyncio.sleep(1)                     # ГЛАВНЫЙ ФИС: asyncio.sleep вместо time.sleep
         return f"Connection failed. {last_reason}"
 
     def update_sensor(self, name: str, value) -> None:
