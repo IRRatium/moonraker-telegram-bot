@@ -1,6 +1,9 @@
 """
-Lightweight HTTP API server for printing status.
-Endpoint: GET /printingstatus
+Lightweight HTTP API server for printing status + LED control.
+
+Endpoints:
+  GET /printingstatus  → JSON printer state
+  GET /ledstatus       → JSON LED state (for ESP8266 polling)
 Port: 7177
 """
 
@@ -24,18 +27,23 @@ def _safe_round(value, digits: int = 2):
 
 
 class _StatusHandler(BaseHTTPRequestHandler):
-    """Minimal HTTP handler — serves only /printingstatus."""
+    """Minimal HTTP handler — serves /printingstatus and /ledstatus."""
 
-    # Shared reference to Klippy instance, set before server starts.
+    # Shared references, set before server starts.
     klippy = None
+    led_controller = None
 
     # ------------------------------------------------------------------ #
     #  HTTP routing                                                        #
     # ------------------------------------------------------------------ #
 
     def do_GET(self):
-        if self.path.rstrip("/") == "/printingstatus":
-            body = json.dumps(self._build_payload(), ensure_ascii=False, indent=2).encode("utf-8")
+        path = self.path.rstrip("/")
+        if path == "/printingstatus":
+            body = json.dumps(self._build_print_payload(), ensure_ascii=False, indent=2).encode("utf-8")
+            self._respond(200, "application/json", body)
+        elif path == "/ledstatus":
+            body = json.dumps(self._build_led_payload(), ensure_ascii=False, indent=2).encode("utf-8")
             self._respond(200, "application/json", body)
         else:
             self._respond(404, "application/json", b'{"error":"not found"}')
@@ -47,10 +55,16 @@ class _StatusHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     # ------------------------------------------------------------------ #
-    #  Payload builder                                                     #
+    #  Payload builders                                                    #
     # ------------------------------------------------------------------ #
 
-    def _build_payload(self) -> dict:
+    def _build_led_payload(self) -> dict:
+        lc = self.led_controller
+        if lc is None:
+            return {"error": "led_controller not ready"}
+        return lc.to_dict()
+
+    def _build_print_payload(self) -> dict:
         kl = self.klippy
         if kl is None:
             return {"error": "klippy not ready"}
@@ -83,7 +97,6 @@ class _StatusHandler(BaseHTTPRequestHandler):
             power_devices[name] = dict(vals)
 
         # --- Heating detection --------------------------------------- #
-        # "heating" = not yet printing but at least one heater has a target > 0
         heating = False
         if not kl.printing:
             for vals in sensors.values():
@@ -93,40 +106,40 @@ class _StatusHandler(BaseHTTPRequestHandler):
 
         return {
             # ---- Connection / state ---------------------------------- #
-            "connected": kl.connected,
-            "state": kl.state,
+            "connected":    kl.connected,
+            "state":        kl.state,
             "state_message": kl.state_message or "",
 
             # ---- Print flags ---------------------------------------- #
             "printing": kl.printing,
-            "paused": kl.paused,
-            "heating": heating,
+            "paused":   kl.paused,
+            "heating":  heating,
 
             # ---- File ------------------------------------------------ #
-            "filename": kl.printing_filename or "",
+            "filename":           kl.printing_filename or "",
             "filename_with_time": kl.printing_filename_with_time if kl.printing_filename else "",
 
             # ---- Progress ------------------------------------------- #
-            "progress_percent": _safe_round(kl.printing_progress * 100),
+            "progress_percent":     _safe_round(kl.printing_progress * 100),
             "vsd_progress_percent": _safe_round(kl.vsd_progress * 100),
-            "height_mm": _safe_round(kl.printing_height),
+            "height_mm":            _safe_round(kl.printing_height),
 
             # ---- Time ----------------------------------------------- #
-            "print_duration_seconds": int(kl.printing_duration),
-            "print_duration_formatted": str(timedelta(seconds=int(kl.printing_duration))),
-            "file_estimated_time_seconds": int(kl.file_estimated_time),
+            "print_duration_seconds":       int(kl.printing_duration),
+            "print_duration_formatted":     str(timedelta(seconds=int(kl.printing_duration))),
+            "file_estimated_time_seconds":  int(kl.file_estimated_time),
             "file_estimated_time_formatted": str(timedelta(seconds=int(kl.file_estimated_time))),
-            "eta_seconds": eta_seconds,
+            "eta_seconds":   eta_seconds,
             "eta_formatted": eta_formatted,
-            "finish_time": finish_time,
+            "finish_time":   finish_time,
 
             # ---- Filament ------------------------------------------- #
-            "filament_used_mm": _safe_round(kl.filament_used),
-            "filament_used_m": _safe_round(kl.filament_used / 1000, 3),
-            "filament_total_mm": _safe_round(kl.filament_total),
-            "filament_total_m": _safe_round(kl.filament_total / 1000, 3),
+            "filament_used_mm":      _safe_round(kl.filament_used),
+            "filament_used_m":       _safe_round(kl.filament_used / 1000, 3),
+            "filament_total_mm":     _safe_round(kl.filament_total),
+            "filament_total_m":      _safe_round(kl.filament_total / 1000, 3),
             "filament_weight_total_g": _safe_round(kl.filament_weight),
-            "filament_weight_used_g": filament_weight_used,
+            "filament_weight_used_g":  filament_weight_used,
 
             # ---- Temperatures / sensors ----------------------------- #
             "sensors": sensors,
@@ -160,7 +173,7 @@ class _StatusHandler(BaseHTTPRequestHandler):
 #  Public interface                                                             #
 # --------------------------------------------------------------------------- #
 
-def start_api_server(klippy, logging_handler: Optional[logging.Handler] = None) -> HTTPServer:
+def start_api_server(klippy, led_controller=None, logging_handler: Optional[logging.Handler] = None) -> HTTPServer:
     """
     Start the status API on port 7177 in a daemon thread.
     Returns the HTTPServer instance (can be used to .shutdown() later).
@@ -169,10 +182,14 @@ def start_api_server(klippy, logging_handler: Optional[logging.Handler] = None) 
         logger.addHandler(logging_handler)
 
     _StatusHandler.klippy = klippy
+    _StatusHandler.led_controller = led_controller
 
     server = HTTPServer(("0.0.0.0", API_PORT), _StatusHandler)
     thread = threading.Thread(target=server.serve_forever, name="api_server", daemon=True)
     thread.start()
 
-    logger.info("Printing status API started → http://0.0.0.0:%d/printingstatus", API_PORT)
+    logger.info(
+        "API started → http://0.0.0.0:%d/printingstatus  |  http://0.0.0.0:%d/ledstatus",
+        API_PORT, API_PORT,
+    )
     return server
