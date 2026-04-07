@@ -524,11 +524,12 @@ class Camera:
         if Path(video_filepath).is_file():
             os.remove(video_filepath)
 
-        lapse_fps = self._calculate_fps(photo_count)
-        odd_frames = 1
-        if self._limit_fps and lapse_fps > self._target_fps:
-            odd_frames = math.ceil(lapse_fps / self._target_fps)
-            lapse_fps = self._target_fps
+        # Фиксированные параметры: всегда 20 секунд при 100 FPS = 2000 итоговых кадров
+        FIXED_FPS = 100
+        FIXED_DURATION = 20
+        TOTAL_OUTPUT_FRAMES = FIXED_FPS * FIXED_DURATION  # 2000
+
+        lapse_fps = FIXED_FPS
 
         with self._camera_lock:
             out = ffmpegcv.VideoWriter(
@@ -537,31 +538,29 @@ class Camera:
                 fps=lapse_fps,
             )
 
-            asyncio.run_coroutine_threadsafe(info_mess.edit_text(text="Images recoding"), loop).result()
+            asyncio.run_coroutine_threadsafe(info_mess.edit_text(text="Images recoding (fixed 20s @ 100fps)"), loop).result()
             last_update_time = time.time()
-            frames_skipped = 0
+
+            # Равномерно распределяем все исходные кадры на 2000 выходных
             frames_recorded = 0
-            for fnum, filename in enumerate(raw_frames):
+            for out_idx in range(TOTAL_OUTPUT_FRAMES):
+                src_idx = int(out_idx * photo_count / TOTAL_OUTPUT_FRAMES)
+                src_idx = min(src_idx, photo_count - 1)
+
                 if time.time() >= last_update_time + 10:
-                    if self._limit_fps:
-                        asyncio.run_coroutine_threadsafe(info_mess.edit_text(text=f"Images processed: {fnum}/{photo_count}, recorded: {frames_recorded}, skipped: {frames_skipped}"), loop).result()
-                    else:
-                        asyncio.run_coroutine_threadsafe(info_mess.edit_text(text=f"Images recoded {fnum}/{photo_count}"), loop).result()
+                    asyncio.run_coroutine_threadsafe(
+                        info_mess.edit_text(text=f"Images recoding: {out_idx}/{TOTAL_OUTPUT_FRAMES}"),
+                        loop,
+                    ).result()
                     last_update_time = time.time()
 
-                if not self._limit_fps or fnum % odd_frames == 0:
-                    out.write(self._get_frame(filename))
-                    frames_recorded += 1
-                else:
-                    frames_skipped += 1
+                out.write(self._get_frame(raw_frames[src_idx]))
+                frames_recorded += 1
 
-            if self._last_frame_duration > 0:
-                asyncio.run_coroutine_threadsafe(info_mess.edit_text(text=f"Repeating last image for {self._last_frame_duration} seconds"), loop).result()
-                for _ in range(lapse_fps * self._last_frame_duration):
-                    out.write(img)
-
-            if self._limit_fps:
-                asyncio.run_coroutine_threadsafe(info_mess.edit_text(text=f"Images recorded: {frames_recorded}, skipped: {frames_skipped}"), loop).result()
+            asyncio.run_coroutine_threadsafe(
+                info_mess.edit_text(text=f"Encoding done: {frames_recorded} frames ({FIXED_DURATION}s @ {FIXED_FPS}fps)"),
+                loop,
+            ).result()
 
             out.release()
             out = None
